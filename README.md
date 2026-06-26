@@ -5,7 +5,7 @@
 > Find it, and you are free."*
 
 A terminal-based existential exploration inspired by the novella
-**[A Short Stay in Hell](https://www.stevenlpeck.com/)** by **Steven L. Peck** (2012).
+**[A Short Stay in Hell](https://stevepeckniche.com/)** by **Steven L. Peck** (2012).
 
 In Peck's vision, Hell is not fire and brimstone. It is a library —
 vast beyond comprehension — containing every book that could possibly
@@ -33,7 +33,7 @@ own vision of Hell.
 Please read both works. They will change how you think about infinity,
 meaning, and the terrifying arithmetic of everything.
 
-- Steven L. Peck: [stevenlpeck.com](https://www.stevenlopeck.com/)
+- Steven L. Peck: [stevenlpeck.com](https://stevepeckniche.com/)
 - *A Short Stay in Hell* on [Goodreads](https://www.goodreads.com/book/show/13456414-a-short-stay-in-hell)
 - *The Library of Babel* by Borges — available in *Labyrinths* (1962)
 
