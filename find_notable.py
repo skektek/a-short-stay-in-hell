@@ -3,17 +3,36 @@
 find_notable.py -- Search the Library for books with unusually high
 spelling scores, suitable for use as example finds to share with others.
 
+Also supports personal search mode: hunts for occurrences of your own
+interview answers (name, birthplace, pet, loves) in the noise. Personal
+matching is a cheap substring check done first; full spelling/readability
+scoring only runs on the rare pages that already contain a personal hit,
+since that scoring is comparatively expensive and personal matches are
+rarer than dictionary-word matches.
+
 Usage:
     python3 find_notable.py [--target 7] [--books 100000] [--pages 1] [--workers 4]
+    python3 find_notable.py --personal              # load from hell.py save file
+    python3 find_notable.py --personal --pages 1     # page 1 only -- your life book
+                                                       # would be about your life
+                                                       # from the very first page
 
 Options:
-    --target   Minimum spelling score %% to qualify (default: 7)
-    --books    Number of books to search this run (default: 100000)
-    --pages    Pages to check per book (default: 1)
-    --workers  CPU workers for parallel search (default: all cores)
-    --seed     Random seed -- only used on a fresh start, ignored on resume
-    --output   Output JSON filename (default: notable_finds.json)
-    --reset    Discard saved state and start fresh
+    --target          Minimum spelling score %% to qualify (default: 7)
+    --books           Number of books to search this run (default: 100000)
+    --pages           Pages to check per book (default: 1)
+    --workers         CPU workers for parallel search (default: all cores)
+    --seed            Random seed -- only used on a fresh start, ignored on resume
+    --output          Output JSON filename (default: notable_finds.json)
+    --reset           Discard saved state and start fresh
+    --min-word-length Also qualify on a real word at least this long (default: off)
+    --personal        Search for your own interview answers instead of/alongside
+                       dictionary words. Loads name/birthdate/birthplace/pet/
+                       first_love/last_love from ~/.hell_state.json. A page
+                       qualifies the moment ANY personal field appears in it --
+                       full spelling/readability scoring then runs on that page
+                       only, since the cheap personal check is the bottleneck
+                       filter and full scoring is reserved for genuine hits.
 
 Runs accumulate: results and RNG state are saved between runs so you
 can stop and resume at any time. Each new run continues from where the
@@ -104,6 +123,42 @@ def length_weighted_score(words: list[str], total_fragments: int) -> float:
     weighted_sum = sum((len(w) - 2) ** 2 for w in words)
     return weighted_sum / total_fragments
 
+# ── Personal search mode ──────────────────────────────────────────────────────
+def load_personal_fields() -> dict | None:
+    """Load name/birthdate/birthplace/pet/loves from hell.py's save file."""
+    state_path = Path.home() / ".hell_state.json"
+    if not state_path.exists():
+        return None
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+        player = state.get("player", {})
+        fields = {
+            "name":        player.get("name", ""),
+            "birthdate":   player.get("birthdate", ""),
+            "birthplace":  player.get("birthplace", ""),
+            "pet":         player.get("pet", ""),
+            "first_love":  player.get("first_love", ""),
+            "last_love":   player.get("last_love", ""),
+        }
+        # Drop empty fields -- nothing to search for
+        return {k: v for k, v in fields.items() if v}
+    except Exception:
+        return None
+
+def personal_matches(page_text: str, personal_fields: dict) -> list[str]:
+    """
+    Cheap substring check: which personal fields appear anywhere in
+    this page? Case-insensitive. This is the fast filter -- full
+    spelling/readability scoring only runs on pages that hit here.
+    """
+    page_lower = page_text.lower()
+    hits = []
+    for field_name, value in personal_fields.items():
+        if value and value.lower() in page_lower:
+            hits.append(field_name)
+    return hits
+
 # ── Worker function (runs in a subprocess) ────────────────────────────────────
 def _worker_init():
     """Initialise per-worker state. Called once when each worker starts."""
@@ -119,62 +174,89 @@ def _worker_init():
 def _score_batch(args: tuple) -> list[dict]:
     """
     Score a batch of book positions. Called in a worker process.
-    args = (positions, pages_per_book, target, min_word_length)
+    args = (positions, pages_per_book, target, min_word_length, personal_fields)
     Returns a list of qualifying result dicts (may be empty).
 
-    A book qualifies if EITHER its spelling score clears `target`,
-    OR it contains a real word at least `min_word_length` letters long
-    (since long words are individually remarkable regardless of the
-    overall page's spelling percentage).
+    Two independent qualification paths, evaluated per page:
+
+    1. Dictionary-word search (always runs): spelling score clears
+       `target`, OR a real word at least `min_word_length` letters
+       long is found.
+
+    2. Personal search (only runs if personal_fields is non-empty):
+       a cheap substring check for any of the player's interview
+       answers (name, birthplace, pet, loves) appearing anywhere in
+       the page. This check is fast, so it runs FIRST as a filter --
+       full spelling/readability scoring is only computed afterward,
+       and only for pages that already contain a personal hit, since
+       personal matches are far rarer than dictionary-word matches
+       and the full scoring pass is comparatively expensive.
     """
-    positions, pages_per_book, target, min_word_length = args
+    positions, pages_per_book, target, min_word_length, personal_fields = args
     results = []
+    has_personal_search = bool(personal_fields)
 
     for pos in positions:
-        best_sp      = 0.0
-        best_rd      = 0.0
-        best_pg      = 0
-        best_txt     = ""
-        best_words   = []
-        best_longest = ("", 0)
+        best_sp        = 0.0
+        best_rd        = 0.0
+        best_pg        = 0
+        best_txt       = ""
+        best_words     = []
+        best_longest   = ("", 0)
+        best_personal  = []
 
         for page_num in range(pages_per_book):
             page_text = hell.generate_page(pos, page_num)
-            sp, rd    = quick_score(page_text)
-            words     = real_words(page_text) if sp > 0 else []
-            longest   = longest_word_info(words)
+
+            # ── Personal check first -- cheap substring search ──────────────
+            personal_hits = (personal_matches(page_text, personal_fields)
+                              if has_personal_search else [])
+
+            # ── Dictionary word check -- always runs ────────────────────────
+            sp, rd  = quick_score(page_text)
+            words   = real_words(page_text) if sp > 0 else []
+            longest = longest_word_info(words)
 
             combined      = sp * 0.7 + rd * 0.3
             prev_combined = best_sp * 0.7 + best_rd * 0.3
 
-            # Track whichever page is more interesting: higher spelling
-            # score OR a longer word found, whichever comes first
-            is_better = (combined > prev_combined or
-                         longest[1] > best_longest[1])
+            # A page is "better" if it has more personal hits than anything
+            # seen so far, OR (failing that) better dictionary-word stats
+            is_better = (
+                len(personal_hits) > len(best_personal) or
+                (len(personal_hits) == len(best_personal) and
+                 (combined > prev_combined or longest[1] > best_longest[1]))
+            )
 
             if is_better:
-                best_sp      = sp
-                best_rd      = rd
-                best_pg      = page_num
-                best_txt     = page_text
-                best_words   = words
-                best_longest = longest
+                best_sp       = sp
+                best_rd       = rd
+                best_pg       = page_num
+                best_txt      = page_text
+                best_words    = words
+                best_longest  = longest
+                best_personal = personal_hits
 
-        qualifies = (best_sp >= target) or (best_longest[1] >= min_word_length)
+        qualifies_dict     = (best_sp >= target) or (best_longest[1] >= min_word_length)
+        qualifies_personal = bool(best_personal)
+        qualifies          = qualifies_dict or qualifies_personal
 
         if qualifies:
-            weighted = length_weighted_score(best_words, len(re.findall(r'[a-zA-Z]{3,}', best_txt)) or 1)
+            weighted = length_weighted_score(
+                best_words, len(re.findall(r'[a-zA-Z]{3,}', best_txt)) or 1
+            )
             results.append({
-                "position":      pos,
-                "page":          best_pg,
-                "spelling":      round(best_sp, 4),
-                "readability":   round(best_rd, 4),
-                "combined":      round(best_sp * 0.7 + best_rd * 0.3, 4),
-                "weighted":      round(weighted, 4),
-                "longest_word":  best_longest[0],
-                "longest_len":   best_longest[1],
-                "words_found":   best_words[:20],
-                "preview":       best_txt[:200].replace("\n", " "),
+                "position":        pos,
+                "page":            best_pg,
+                "spelling":        round(best_sp, 4),
+                "readability":     round(best_rd, 4),
+                "combined":        round(best_sp * 0.7 + best_rd * 0.3, 4),
+                "weighted":        round(weighted, 4),
+                "longest_word":    best_longest[0],
+                "longest_len":     best_longest[1],
+                "words_found":     best_words[:20],
+                "personal_hits":   best_personal,
+                "preview":         best_txt[:200].replace("\n", " "),
             })
 
     return results
@@ -231,17 +313,19 @@ def restore_rng(state: dict) -> random.Random:
 # ── Progress bar ──────────────────────────────────────────────────────────────
 def progress(checked: int, target_n: int, found: int,
              total_checked: int, best: float, longest: int,
-             rate: float, workers: int):
+             rate: float, workers: int, personal_hits: int = 0):
     pct   = checked / target_n * 100
     eta_s = (target_n - checked) / rate if rate > 0 else 0
     eta   = time.strftime("%H:%M:%S", time.gmtime(eta_s))
     blen  = 20
     bar   = "█" * int(blen * checked / target_n) + "░" * (blen - int(blen * checked / target_n))
+    personal_str = f"Personal hits: {personal_hits}  " if personal_hits or True else ""
     print(
         f"\r  [{bar}] {pct:5.1f}%  "
         f"Run: {checked:,}/{target_n:,}  "
         f"Total: {total_checked:,} / {found} found  "
         f"Best: {best*100:5.2f}%  Longest word: {longest}  "
+        f"{personal_str}"
         f"{rate:,.0f}/s ({workers}w)  ETA: {eta}  ",
         end="", flush=True
     )
@@ -253,7 +337,7 @@ _BATCH = 500
 
 def search(target_pct: float, n_books: int, pages_per_book: int,
            output_file: str, seed: int | None, n_workers: int,
-           min_word_length: int) -> list:
+           min_word_length: int, personal_fields: dict | None = None) -> list:
 
     target      = target_pct / 100.0
     MAX_POS     = 10 ** 18
@@ -270,7 +354,8 @@ def search(target_pct: float, n_books: int, pages_per_book: int,
             seen_positions.add(f["position"])
             deduped.append(f)
     found = deduped
-    found.sort(key=lambda x: (x.get("longest_len", 0),
+    found.sort(key=lambda x: (len(x.get("personal_hits", [])),
+                               x.get("longest_len", 0),
                                x.get("weighted", 0),
                                x.get("combined", 0)), reverse=True)
 
@@ -294,6 +379,7 @@ def search(target_pct: float, n_books: int, pages_per_book: int,
 
     best_global       = max((f["spelling"] for f in found), default=0.0)
     longest_global    = max((f.get("longest_len", 0) for f in found), default=0)
+    personal_hits_global = sum(1 for f in found if f.get("personal_hits"))
     rate        = 1.0
     start       = time.time()
     run_checked = 0
@@ -330,7 +416,8 @@ def search(target_pct: float, n_books: int, pages_per_book: int,
                 positions[i:i + chunk_size]
                 for i in range(0, len(positions), chunk_size)
             ]
-            tasks = [(chunk, pages_per_book, target, min_word_length) for chunk in chunks]
+            tasks = [(chunk, pages_per_book, target, min_word_length, personal_fields or {})
+                     for chunk in chunks]
 
             # Dispatch to workers and collect results
             try:
@@ -347,10 +434,13 @@ def search(target_pct: float, n_books: int, pages_per_book: int,
                         found.append(result)
                         best_global    = max(best_global, result["spelling"])
                         longest_global = max(longest_global, result.get("longest_len", 0))
+                        if result.get("personal_hits"):
+                            personal_hits_global += 1
 
             # Sort by longest word found first (the rarer, more interesting
             # signal), then by weighted score, then by raw spelling percentage
-            found.sort(key=lambda x: (x.get("longest_len", 0),
+            found.sort(key=lambda x: (len(x.get("personal_hits", [])),
+                                       x.get("longest_len", 0),
                                        x.get("weighted", 0),
                                        x["combined"]), reverse=True)
 
@@ -366,7 +456,8 @@ def search(target_pct: float, n_books: int, pages_per_book: int,
             elapsed = time.time() - start
             rate    = run_checked / elapsed if elapsed > 0 else 1
             progress(run_checked, n_books, len(found),
-                     total_checked, best_global, longest_global, rate, n_workers)
+                     total_checked, best_global, longest_global, rate, n_workers,
+                     personal_hits_global)
 
     print()
 
@@ -386,8 +477,10 @@ def show_results(found: list, output_file: str):
         print("  or running again to search more books.")
         return
 
-    print(f"\n  {len(found)} notable book(s) in collection. Top 10")
-    print("  (sorted by longest word found, then weighted rarity, then spelling %):")
+    n_personal = sum(1 for f in found if f.get("personal_hits"))
+    print(f"\n  {len(found)} notable book(s) in collection"
+          f"{f', {n_personal} with personal hits' if n_personal else ''}. Top 10")
+    print("  (sorted by personal hits first, then longest word, then rarity):")
     print()
     print("  " + "=" * 66)
     print("  NOTABLE FINDS")
@@ -398,8 +491,11 @@ def show_results(found: list, output_file: str):
         longest   = book.get("longest_word", "")
         long_len  = book.get("longest_len", 0)
         weighted  = book.get("weighted", 0)
+        personal  = book.get("personal_hits", [])
 
-        if long_len >= 5:
+        if personal:
+            label = f"notable find #{i} — PERSONAL MATCH: {', '.join(personal)}"
+        elif long_len >= 5:
             label = f"notable find #{i} — \"{longest}\" ({long_len} letters)"
         else:
             label = f"notable find #{i} — spelling {book['spelling']*100:.1f}%"
@@ -407,6 +503,8 @@ def show_results(found: list, output_file: str):
         print(f"\n  [{i:2}] Code:          {code}")
         print(f"        Position:      {book['position']}")
         print(f"        Page:          {book['page'] + 1} / {hell.PAGES_PER_BOOK}")
+        if personal:
+            print(f"        *** PERSONAL HIT: {', '.join(personal)} ***")
         if longest:
             print(f"        Longest word:  \"{longest}\" ({long_len} letters)")
         print(f"        Spelling:      {book['spelling']    * 100:6.2f}%")
@@ -455,6 +553,11 @@ def main():
         help="Also qualify any book containing a real word at least this "
              "long, regardless of overall spelling %% (default: 999, "
              "effectively disabled -- try 5 or 6 to hunt for rare long words)")
+    parser.add_argument("--personal", action="store_true",
+        help="Search for your own interview answers (name, birthplace, pet, "
+             "loves) loaded from ~/.hell_state.json, in addition to the "
+             "usual dictionary-word search. A page qualifies immediately "
+             "if any personal field appears in it.")
     args = parser.parse_args()
 
     # Clamp workers to something sensible
@@ -475,6 +578,24 @@ def main():
         print("  State cleared. Starting fresh.")
         print()
 
+    personal_fields = None
+    if args.personal:
+        personal_fields = load_personal_fields()
+        if not personal_fields:
+            print("  --personal was requested but no usable data was found in")
+            print("  ~/.hell_state.json. Run hell.py and complete the interview")
+            print("  first, then try again.")
+            print()
+            sys.exit(1)
+        print("  Personal search enabled. Hunting for:")
+        for field_name, value in personal_fields.items():
+            print(f"    {field_name}: {value}")
+        print()
+        if args.pages > 1:
+            print("  Note: your life book would be about your life from the very")
+            print("  first page -- consider --pages 1 for a ~{}x speedup.".format(args.pages))
+            print()
+
     print(f"  Searching {args.books:,} books this run, {args.pages} page(s) each.")
     print(f"  Workers: {n_workers} (of {multiprocessing.cpu_count()} available cores)")
     print(f"  Target: spelling score >= {args.target:.0f}%")
@@ -494,6 +615,7 @@ def main():
         seed            = args.seed,
         n_workers       = n_workers,
         min_word_length = args.min_word_length,
+        personal_fields = personal_fields,
     )
 
     show_results(found, args.output)
