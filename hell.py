@@ -13,6 +13,7 @@ import random
 import hashlib
 import textwrap
 import time
+import math
 from pathlib import Path
 
 # Allow conversion of astronomically large integers (positions have ~2.6M digits)
@@ -84,6 +85,13 @@ BOOKS_PER_ROW   = 35
 BOOKS_PER_UNIT  = ROWS_PER_UNIT * BOOKS_PER_ROW            # 280
 SIDES_PER_FLOOR = 2
 UNITS_PER_FLOOR = 20_000 * BOOKS_PER_UNIT
+
+# -- Fall physics (sea-level Earth standard) ----------------------------------
+GRAVITY_MS2          = 9.81     # m/s^2
+TERMINAL_VELOCITY_MS = 53.0     # m/s, average human belly-to-earth position
+FLOOR_HEIGHT_M       = 2.9      # meters per floor (matches library design)
+DEHYDRATION_DAYS     = 3.0      # days to die of dehydration without water
+DEHYDRATION_SECONDS  = DEHYDRATION_DAYS * 86400
 
 # Total books = 95^1,312,000
 TOTAL_BOOKS = CHARSET_SIZE ** CHARS_PER_BOOK
@@ -223,13 +231,17 @@ def _get_lt():
 
 def score_page(page_text: str, player: dict,
                book_position: int, life_position: int) -> dict:
-    tokens       = page_text.split()
-    total_tokens = max(len(tokens), 1)
+    # Extract actual words (3+ letters) from the noise using regex
+    # Raw split() gives full 80-char lines as tokens which never match dictionary
+    import re as _re
+    _words       = _re.findall(r'[a-zA-Z]{3,}', page_text)
+    total_tokens = max(len(_words), 1)
 
-    # Spelling
+    # Spelling -- what fraction of extracted words are real English words
     spell         = _get_spell()
-    known         = spell.known(tokens)
-    spelling_score = len(known) / total_tokens
+    _wf           = spell.word_frequency
+    known_count   = sum(1 for w in _words if w.lower() in _wf)
+    spelling_score = known_count / total_tokens
 
     # Readability
     try:
@@ -391,7 +403,7 @@ def clock_comment(seconds: float) -> str:
     if d <   7:    return "A week in the Library. Your life above had weeks like this too."
     # Weeks 1-4
     if d <  10:    return "The shelves do not miss you when you are gone."
-    if d <  14:    return "Nearly two weeks. You have examined perhaps ten thousand books."
+    if d <  14:    return "Nearly two weeks. The shelves have not changed. You have."
     if d <  21:    return "Others arrived after you. They are still looking too."
     if d <  30:    return "The Library is the same in every direction. You know this now."
     # Months 1-12
@@ -1148,8 +1160,85 @@ def examine_book(state: dict, client):
     save_state(state)
 
 # -- Falling ------------------------------------------------------------------
+def fall_physics(n_floors: int) -> dict:
+    """
+    Compute the real-world physics of falling n_floors at sea-level
+    terminal velocity, including how many dehydration-deaths would be
+    required if a single fall takes longer than DEHYDRATION_SECONDS.
+
+    Returns a dict with: distance_m, fall_seconds, deaths_required,
+    survivable_floors (the floors actually reached before death/limit).
+    """
+    distance_m = n_floors * FLOOR_HEIGHT_M
+
+    # Time to fall at terminal velocity (ignoring the brief acceleration
+    # phase -- negligible at any scale worth falling)
+    fall_seconds = distance_m / TERMINAL_VELOCITY_MS
+
+    if fall_seconds <= DEHYDRATION_SECONDS:
+        # Survivable in a single fall -- no deaths required
+        return {
+            "distance_m":        distance_m,
+            "fall_seconds":      fall_seconds,
+            "deaths_required":   0,
+            "survivable_floors": n_floors,
+        }
+
+    # Distance coverable before dehydration claims you
+    distance_per_life_m = TERMINAL_VELOCITY_MS * DEHYDRATION_SECONDS
+    floors_per_life      = distance_per_life_m / FLOOR_HEIGHT_M
+
+    # How many death-cycles to cover the requested distance
+    deaths_required = math.ceil(n_floors / floors_per_life)
+
+    return {
+        "distance_m":        distance_m,
+        "fall_seconds":      fall_seconds,
+        "deaths_required":   deaths_required,
+        "floors_per_life":   floors_per_life,
+        "survivable_floors": n_floors,   # the fall itself is "successful" --
+                                          # it just takes many lifetimes
+    }
+
+def format_fall_duration(seconds: float) -> str:
+    """Human-readable duration, scaling up to cosmological terms if needed."""
+    if seconds < 60:
+        return f"{seconds:.1f} seconds"
+    if seconds < 3600:
+        return f"{seconds/60:.1f} minutes"
+    if seconds < 86400:
+        return f"{seconds/3600:.1f} hours"
+    days = seconds / 86400
+    if days < 365:
+        return f"{days:,.1f} days"
+    years = days / 365
+    if years < 1000:
+        return f"{years:,.1f} years"
+    # Beyond this, use log-scale notation
+    log10_years = math.log10(years)
+    return f"10^{log10_years:,.0f} years"
+
 def fall_floors(state: dict):
-    """Player jumps/falls down N floors."""
+    """Player jumps/falls down N floors -- with real fall physics."""
+
+    # Already at the bottom -- there is nothing to fall into
+    if state["position"] == 0:
+        clear()
+        print()
+        print("=" * 70)
+        print()
+        print("  You are already at the bottom of the Library.")
+        time.sleep(0.6)
+        print("  There is a floor here. There is nowhere lower to go.")
+        time.sleep(0.6)
+        print("  You could jump, if you wanted. You would simply land")
+        print("  exactly where you are standing.")
+        time.sleep(0.8)
+        print()
+        print("=" * 70)
+        input("\n  Press Enter to continue...\n")
+        return
+
     try:
         raw = input("  Fall how many floors? ").strip()
         n   = int(raw)
@@ -1162,20 +1251,99 @@ def fall_floors(state: dict):
         time.sleep(1)
         return
 
-    state["position"] = clamp(state["position"] - n * UNITS_PER_FLOOR)
+    # Clamp the actual floors fallen to what the library allows
+    # (position can never go below 0 -- the literal bottom of the library)
+    current_pos       = state["position"]
+    requested_units   = n * UNITS_PER_FLOOR
+    actual_units      = min(requested_units, current_pos)
+    actual_floors     = actual_units // UNITS_PER_FLOOR
+    reaches_bottom    = (actual_units >= current_pos)
+
+    # Physics is computed on the floors ACTUALLY fallen, not the request
+    physics = fall_physics(actual_floors)
+
+    state["position"] = clamp(current_pos - actual_units)
     state["page"]     = 0
+
+    # Advance the Great Clock by the time the fall actually took.
+    # A fall through dehydration deaths still costs real time -- the
+    # Library does not let you skip the suffering, only survive it.
+    state["arrival_time"] = state.get("arrival_time", time.time()) - physics["fall_seconds"]
+
     save_state(state)
 
     clear()
     print()
     print("=" * 70)
     print()
-    msg = fall_message(n)
-    for line in msg.split("\n"):
-        print(f"  {line}")
-        time.sleep(0.3)
+
+    if reaches_bottom and requested_units > current_pos:
+        # They asked to fall further than the library allows -- and made it
+        print("  You fall, and fall, and fall.")
+        time.sleep(0.6)
+        print("  Eventually there is a floor beneath you, because the")
+        print("  Library, vast as it is, is not infinite in this direction.")
+        time.sleep(0.8)
+        print()
+        print(f"  You requested {n:,} floors. Only {format_big(actual_floors)}")
+        print(f"  existed beneath you.")
+        time.sleep(0.8)
+        print()
+        print("  You strike the bottom.")
+        time.sleep(0.6)
+        print("  There is a floor here, same as all the others -- same")
+        print("  shelves, same silence, same impossible mathematics")
+        print("  stretching back up into darkness you cannot see the end of.")
+        time.sleep(0.6)
+        print("  You have arrived at the only verifiably finite point in")
+        print("  the entire Library.")
+        time.sleep(0.8)
+        print("  It does not help.")
+        time.sleep(1.0)
+    elif reaches_bottom:
+        # They asked for exactly enough to reach bottom
+        print("  You fall the requested distance, precisely.")
+        time.sleep(0.5)
+        print()
+        print("  You strike the bottom.")
+        time.sleep(0.6)
+        print("  There is a floor here, same as all the others -- same")
+        print("  shelves, same silence, same impossible mathematics")
+        print("  stretching back up into darkness you cannot see the end of.")
+        time.sleep(0.6)
+        print("  You have arrived at the only verifiably finite point in")
+        print("  the entire Library.")
+        time.sleep(0.8)
+        print("  It does not help.")
+        time.sleep(1.0)
+    else:
+        msg = fall_message(min(n, 1_000_000))  # cap message lookup at sane range
+        for line in msg.split("\n"):
+            print(f"  {line}")
+            time.sleep(0.3)
+
     print()
-    print(f"  Floors fallen: {n:,}")
+    print(f"  Floors fallen:     {format_big(actual_floors)}")
+    print(f"  Distance:          {physics['distance_m']:,.0f} meters "
+          f"({physics['distance_m']/1000:,.1f} km)")
+
+    if physics["deaths_required"] > 0:
+        print()
+        print(f"  At terminal velocity ({TERMINAL_VELOCITY_MS:.0f} m/s) this fall")
+        print(f"  would take {format_fall_duration(physics['fall_seconds'])}.")
+        print(f"  You cannot survive that long without water.")
+        print()
+        if physics["deaths_required"] > 10**6:
+            log10_deaths = math.log10(physics["deaths_required"])
+            print(f"  Deaths required to complete this fall: 10^{log10_deaths:,.0f}")
+        else:
+            print(f"  Deaths required to complete this fall: {physics['deaths_required']:,}")
+        print(f"  The Great Clock has been advanced accordingly.")
+        print(f"  You arrive having already lived through all of it.")
+    else:
+        print(f"  Fall time:         {format_fall_duration(physics['fall_seconds'])}")
+        print(f"  (survived without incident)")
+
     print()
     print("=" * 70)
     input("\n  Press Enter to collect yourself...\n")
