@@ -33,7 +33,7 @@ own vision of Hell.
 Please read both works. They will change how you think about infinity,
 meaning, and the terrifying arithmetic of everything.
 
-- Steven L. Peck: [stevenlpeck.com](https://stevepeckniche.com/)
+- Steven L. Peck: [stevepeckniche.com](https://stevepeckniche.com/)
 - *A Short Stay in Hell* on [Goodreads](https://www.goodreads.com/book/show/13456414-a-short-stay-in-hell)
 - *The Library of Babel* by Borges — available in *Labyrinths* (1962)
 
@@ -79,17 +79,29 @@ You will almost certainly never find it.
 
 ## Can You Cheat?
 
-Yes. And no.
+Yes. But, also no.
 
-You could write a script that calls the scoring function in a loop,
-checking millions of books per second. Modern hardware might examine
-ten million books per minute.
+`find_notable.py` exists for exactly this purpose. It walks the Library
+far faster than any soul could on foot, checking thousands of books per
+second instead of one book at a time, sorting through the noise for
+fragments of real language. Run it across multiple CPU cores and you
+can tiptoe through the Library at whatever speed your compute cores
+allow you to operate — a privilege denied to every soul inside the
+story itself.
 
-The library contains 95^1,312,000 books.
+It does not matter.
 
-At ten million books per minute, searching the entire library would
-take approximately 10^(1,312,000) minutes. The current age of the
-universe is about 10^10 years, which is roughly 10^16 minutes.
+The library contains 95^1,312,000 books. At a generous ten thousand
+books per second across many cores, searching the entire library would
+take approximately 10^(1,312,000) seconds. The current age of the
+universe is about 10^10 years, which is roughly 10^17 seconds.
+
+Run the numbers yourself: the speedup `find_notable.py` provides over
+a human turning pages by hand is enormous and the distance remaining
+is enormous beyond enormous. Multiplying a very large number by a
+very large speedup leaves you with a number that is, for all practical
+purposes, exactly as large. The decimal point does not move far enough
+to notice.
 
 Cheating does not move the needle. It makes the needle irrelevant.
 
