@@ -80,11 +80,26 @@ print(" done.")
 
 _PREFILTER = 0.05
 
+def is_valid_casing(word: str) -> bool:
+    """
+    Accept a dictionary match only if its casing looks like real text:
+    either all-lowercase, ALL-UPPERCASE, or Capitalized (first letter
+    upper, rest lower -- covers proper nouns without needing to detect
+    them). Mixed/erratic casing like 'MissIOn' or 'PoL' is noise that
+    happens to match a word case-insensitively, not a genuine find.
+    """
+    if word.islower() or word.isupper():
+        return True
+    if word[0].isupper() and word[1:].islower():
+        return True
+    return False
+
 def spelling_score(page_text: str) -> float:
     words = re.findall(r'[a-zA-Z]{3,}', page_text)
     if not words:
         return 0.0
-    return sum(1 for w in words if w.lower() in _wf) / len(words)
+    return sum(1 for w in words
+               if w.lower() in _wf and is_valid_casing(w)) / len(words)
 
 def quick_score(page_text: str) -> tuple[float, float]:
     sp = spelling_score(page_text)
@@ -100,7 +115,7 @@ def quick_score(page_text: str) -> tuple[float, float]:
 
 def real_words(page_text: str) -> list[str]:
     return [w for w in re.findall(r'[a-zA-Z]{3,}', page_text)
-            if w.lower() in _wf]
+            if w.lower() in _wf and is_valid_casing(w)]
 
 def longest_word_info(words: list[str]) -> tuple[str, int]:
     """Return (longest_word, length). Empty string/0 if no words found."""
@@ -109,19 +124,21 @@ def longest_word_info(words: list[str]) -> tuple[str, int]:
     longest = max(words, key=len)
     return longest, len(longest)
 
-def length_weighted_score(words: list[str], total_fragments: int) -> float:
+def unified_score(words: list[str], total_fragments: int) -> float:
     """
-    Score that rewards rare long words far more than common short ones.
-    A 3-letter match contributes 1 point, 4-letter contributes 4,
-    5-letter contributes 9, 6-letter contributes 16, etc. -- since
-    longer real-word matches are exponentially less likely by chance,
-    this surfaces genuinely improbable finds rather than just word-dense
-    pages full of cheap 3-letter coincidences.
+    Single score combining word count and word length, rewarding pages
+    that have MORE words and LONGER words simultaneously. Each matched
+    word contributes (length-2)^2 points (3-letter=1, 4=4, 5=9, 6=16,
+    7=25...) since longer real-word matches are exponentially less
+    likely by chance than short ones. The sum is normalized by total
+    fragments on the page and scaled by 100 for a readable range --
+    typical interesting pages land around 1-7, with a single long word
+    or several shorter ones both able to produce a meaningful score.
     """
     if not words or total_fragments == 0:
         return 0.0
-    weighted_sum = sum((len(w) - 2) ** 2 for w in words)
-    return weighted_sum / total_fragments
+    raw = sum((len(w) - 2) ** 2 for w in words)
+    return (raw / total_fragments) * 100
 
 # ── Personal search mode ──────────────────────────────────────────────────────
 def load_personal_fields() -> dict | None:
@@ -242,7 +259,7 @@ def _score_batch(args: tuple) -> list[dict]:
         qualifies          = qualifies_dict or qualifies_personal
 
         if qualifies:
-            weighted = length_weighted_score(
+            score = unified_score(
                 best_words, len(re.findall(r'[a-zA-Z]{3,}', best_txt)) or 1
             )
             results.append({
@@ -251,7 +268,7 @@ def _score_batch(args: tuple) -> list[dict]:
                 "spelling":        round(best_sp, 4),
                 "readability":     round(best_rd, 4),
                 "combined":        round(best_sp * 0.7 + best_rd * 0.3, 4),
-                "weighted":        round(weighted, 4),
+                "score":           round(score, 4),
                 "longest_word":    best_longest[0],
                 "longest_len":     best_longest[1],
                 "words_found":     best_words[:20],
@@ -356,7 +373,7 @@ def search(target_pct: float, n_books: int, pages_per_book: int,
     found = deduped
     found.sort(key=lambda x: (len(x.get("personal_hits", [])),
                                x.get("longest_len", 0),
-                               x.get("weighted", 0),
+                               x.get("score", 0),
                                x.get("combined", 0)), reverse=True)
 
     if saved:
@@ -441,7 +458,7 @@ def search(target_pct: float, n_books: int, pages_per_book: int,
             # signal), then by weighted score, then by raw spelling percentage
             found.sort(key=lambda x: (len(x.get("personal_hits", [])),
                                        x.get("longest_len", 0),
-                                       x.get("weighted", 0),
+                                       x.get("score", 0),
                                        x["combined"]), reverse=True)
 
             run_checked   += batch_size
@@ -480,7 +497,7 @@ def show_results(found: list, output_file: str):
     n_personal = sum(1 for f in found if f.get("personal_hits"))
     print(f"\n  {len(found)} notable book(s) in collection"
           f"{f', {n_personal} with personal hits' if n_personal else ''}. Top 10")
-    print("  (sorted by personal hits first, then longest word, then rarity):")
+    print("  (sorted by personal hits first, then longest word, then overall score):")
     print()
     print("  " + "=" * 66)
     print("  NOTABLE FINDS")
@@ -490,7 +507,7 @@ def show_results(found: list, output_file: str):
         code      = hell.book_share_code(book["position"])
         longest   = book.get("longest_word", "")
         long_len  = book.get("longest_len", 0)
-        weighted  = book.get("weighted", 0)
+        score_val = book.get("score", 0)
         personal  = book.get("personal_hits", [])
 
         if personal:
@@ -509,7 +526,7 @@ def show_results(found: list, output_file: str):
             print(f"        Longest word:  \"{longest}\" ({long_len} letters)")
         print(f"        Spelling:      {book['spelling']    * 100:6.2f}%")
         print(f"        Readability:   {book['readability'] * 100:6.2f}%")
-        print(f"        Weighted:      {weighted:6.2f}  (rewards rare long words)")
+        print(f"        Score:         {score_val:6.2f}  (rewards more + longer words)")
         print(f"        Words found:   {book['words_found'][:10]}")
         print(f"        Preview:       \"{book['preview'][:70]}...\"")
 
