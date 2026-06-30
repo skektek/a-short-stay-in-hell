@@ -116,6 +116,108 @@ DEHYDRATION_SECONDS  = DEHYDRATION_DAYS * 86400
 STATE_FILE  = Path.home() / ".hell_state.json"
 SHARES_FILE = Path.home() / ".hell_shares"   # directory for .hell share files
 
+# -- Planted text (optional easter egg) ---------------------------------------
+# If a text file is present alongside hell.py, one specific book on every
+# floor -- determined by floor number salted with PLANTED_TEXT_SALT -- will
+# contain that text instead of generated noise. The position is derived,
+# not hardcoded, so it cannot be found by reading the source alone; you
+# would need to know the salt and recompute it per floor.
+#
+# Absent the file, the game behaves exactly as it always has -- this is a
+# fully optional dependency with a silent fallback.
+PLANTED_TEXT_FILENAME = "zend_avesta.txt"
+PLANTED_TEXT_SALT     = "Ahura Mazda"
+
+_planted_text_cache: dict = {"pages": None, "loaded": False}
+
+def _load_planted_text() -> list[str] | None:
+    """
+    Load and reflow the planted text file into a list of pages, each
+    exactly CHARS_PER_PAGE characters (padded with spaces if needed),
+    cached after first load. Returns None if the file is absent.
+    """
+    if _planted_text_cache["loaded"]:
+        return _planted_text_cache["pages"]
+
+    _planted_text_cache["loaded"] = True  # only attempt this once
+
+    text_path = Path(__file__).resolve().parent / PLANTED_TEXT_FILENAME
+    if not text_path.exists():
+        return None
+
+    try:
+        raw = text_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+    # Collapse whitespace to single spaces, keep it within the printable
+    # ASCII charset the library uses elsewhere
+    flat = " ".join(raw.split())
+    flat = "".join(c if c in CHARSET else " " for c in flat)
+
+    # Reflow into fixed-width pages of CHARS_PER_PAGE characters each,
+    # breaking on word boundaries where possible
+    pages: list[str] = []
+    words = flat.split(" ")
+    current_page_chars: list[str] = []
+    current_len = 0
+
+    def flush_page():
+        nonlocal current_page_chars, current_len
+        page_text = " ".join(current_page_chars)
+        page_text = page_text[:CHARS_PER_PAGE].ljust(CHARS_PER_PAGE)
+        # Re-wrap into fixed 80-char lines for display consistency
+        lines = [page_text[i:i + CHARS_PER_LINE]
+                 for i in range(0, CHARS_PER_PAGE, CHARS_PER_LINE)]
+        pages.append("\n".join(lines))
+        current_page_chars = []
+        current_len = 0
+
+    for word in words:
+        if not word:
+            continue
+        addition = (1 if current_page_chars else 0) + len(word)
+        if current_len + addition > CHARS_PER_PAGE:
+            flush_page()
+            if len(pages) >= PAGES_PER_BOOK:
+                break
+        current_page_chars.append(word)
+        current_len += addition
+
+    if current_page_chars and len(pages) < PAGES_PER_BOOK:
+        flush_page()
+
+    _planted_text_cache["pages"] = pages
+    return pages
+
+def _planted_text_position(floor_number: int) -> int:
+    """
+    Derive the single book position on a given floor that holds the
+    planted text, salted so it is not predictable from source alone.
+    """
+    units_per_floor_books = UNITS_PER_FLOOR * BOOKS_PER_UNIT
+    seed_str = f"{floor_number}:{PLANTED_TEXT_SALT}"
+    digest   = hashlib.sha256(seed_str.encode()).hexdigest()
+    offset   = int(digest, 16) % units_per_floor_books
+    return floor_number * units_per_floor_books + offset
+
+def _check_planted_text(pos: int) -> str | None:
+    """
+    If `pos` is the planted-text position for its own floor, and the
+    text file is available, return the page list for that book.
+    Otherwise return None (caller falls back to generated noise).
+    """
+    pages = _load_planted_text()
+    if not pages:
+        return None
+
+    units_per_floor_books = UNITS_PER_FLOOR * BOOKS_PER_UNIT
+    floor_number = pos // units_per_floor_books
+
+    if pos == _planted_text_position(floor_number):
+        return pages
+    return None
+
 # -- ANSI colors --------------------------------------------------------------
 YELLOW = "\033[93m"
 BOLD   = "\033[1m"
@@ -184,7 +286,18 @@ def get_anthropic_client(api_key: str | None) -> object | None:
 
 # -- Book generation ----------------------------------------------------------
 def generate_page(book_position: int, page_number: int) -> str:
-    """Generate a deterministic page of text from book position and page number."""
+    """
+    Generate a deterministic page of text from book position and page number.
+    On exactly one specially-derived position per floor, if a planted text
+    file is present, real text is served instead of generated noise for
+    however many pages that text occupies; pages beyond the text's length
+    (within that same book) fall back to ordinary generated noise, keeping
+    the book's remaining pages indistinguishable from any other.
+    """
+    planted_pages = _check_planted_text(book_position)
+    if planted_pages is not None and page_number < len(planted_pages):
+        return planted_pages[page_number]
+
     seed = book_position * PAGES_PER_BOOK + page_number
     rng  = random.Random(seed)
     chars = [rng.choice(CHARSET) for _ in range(CHARS_PER_PAGE)]
