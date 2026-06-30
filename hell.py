@@ -84,7 +84,25 @@ ROWS_PER_UNIT   = 8
 BOOKS_PER_ROW   = 35
 BOOKS_PER_UNIT  = ROWS_PER_UNIT * BOOKS_PER_ROW            # 280
 SIDES_PER_FLOOR = 2
-UNITS_PER_FLOOR = 20_000 * BOOKS_PER_UNIT
+
+# Total books in the Library = 95^1,312,000
+print("  Calibrating the Library's geometry...", end="", flush=True)
+TOTAL_BOOKS = CHARSET_SIZE ** CHARS_PER_BOOK
+
+# The Library is square: floors == shelf units per side. Each floor is an
+# "O" shape -- two long sides of UNITS_PER_SIDE shelf units each, connected
+# at both ends. Walking forward traverses one full side before crossing
+# to the other at the end, then moving up a floor after completing the loop.
+#
+# floors^2 * SIDES_PER_FLOOR * BOOKS_PER_UNIT = TOTAL_BOOKS
+# UNITS_PER_SIDE = floors = isqrt(TOTAL_BOOKS / (SIDES_PER_FLOOR * BOOKS_PER_UNIT))
+#
+# math.isqrt is used instead of floating point log/sqrt because the result
+# has over a million digits -- far beyond float64 precision.
+_target_for_sqrt = TOTAL_BOOKS // (SIDES_PER_FLOOR * BOOKS_PER_UNIT)
+UNITS_PER_SIDE   = math.isqrt(_target_for_sqrt)
+UNITS_PER_FLOOR  = SIDES_PER_FLOOR * UNITS_PER_SIDE   # full "O" loop, both sides
+print(" done.")
 
 # -- Fall physics (sea-level Earth standard) ----------------------------------
 GRAVITY_MS2          = 9.81     # m/s^2
@@ -93,8 +111,7 @@ FLOOR_HEIGHT_M       = 2.9      # meters per floor (matches library design)
 DEHYDRATION_DAYS     = 3.0      # days to die of dehydration without water
 DEHYDRATION_SECONDS  = DEHYDRATION_DAYS * 86400
 
-# Total books = 95^1,312,000
-TOTAL_BOOKS = CHARSET_SIZE ** CHARS_PER_BOOK
+# Total books = 95^1,312,000 (already computed above during geometry calibration)
 
 STATE_FILE  = Path.home() / ".hell_state.json"
 SHARES_FILE = Path.home() / ".hell_shares"   # directory for .hell share files
@@ -176,26 +193,76 @@ def generate_page(book_position: int, page_number: int) -> str:
     return '\n'.join(lines)
 
 # -- Position <-> physical location -------------------------------------------
+# Caches the last computed location since the floor/side divmod is expensive
+# (division between numbers with ~1.3M and ~2.6M digits respectively).
+_location_cache: dict = {"pos": None, "loc": None}
+
 def position_to_location(pos: int) -> dict:
-    book_in_unit = pos % BOOKS_PER_UNIT
-    row          = book_in_unit // BOOKS_PER_ROW
-    col          = book_in_unit % BOOKS_PER_ROW
-    unit_number  = pos // BOOKS_PER_UNIT
-    side         = unit_number % SIDES_PER_FLOOR
-    floor_unit   = unit_number // SIDES_PER_FLOOR
-    return {
-        "floor": floor_unit,
-        "side":  "Left" if side == 0 else "Right",
-        "unit":  unit_number,
-        "row":   row + 1,
-        "col":   col + 1,
+    """
+    Map a raw book position to physical coordinates within the Library's
+    real "O" shaped geometry: each floor is a loop with two long sides
+    (Right and Left) of UNITS_PER_SIDE shelf units each, joined at both
+    ends across the central abyss. Walking forward traverses the full
+    length of one side before crossing over to the other.
+    """
+    if _location_cache["pos"] == pos:
+        return _location_cache["loc"]
+
+    book_in_unit  = pos % BOOKS_PER_UNIT
+    row           = book_in_unit // BOOKS_PER_ROW
+    col           = book_in_unit % BOOKS_PER_ROW
+
+    unit_index = pos // BOOKS_PER_UNIT          # which shelf unit, overall
+    # divmod computes quotient and remainder together -- roughly 15x faster
+    # than calling % and // separately when dividing million-digit integers
+    floor_number, unit_in_floor = divmod(unit_index, UNITS_PER_FLOOR)
+
+    if unit_in_floor < UNITS_PER_SIDE:
+        side         = "Right"
+        unit_on_side = unit_in_floor
+    else:
+        side         = "Left"
+        unit_on_side = unit_in_floor - UNITS_PER_SIDE
+
+    loc = {
+        "floor":        floor_number,
+        "side":         side,
+        "unit":         unit_on_side,    # position along the current side
+        "unit_overall": unit_index,      # raw shelf unit index, for reference
+        "row":          row + 1,
+        "col":          col + 1,
     }
 
+    _location_cache["pos"] = pos
+    _location_cache["loc"] = loc
+    return loc
+
+_format_big_cache: dict = {}
+_FORMAT_BIG_CACHE_MAX = 8   # small LRU-ish cache; header uses ~3 distinct values
+
 def format_big(n: int, digits: int = 6) -> str:
+    """
+    Format a huge integer as 'first...last (N digits)'. Cached, since
+    str() on a million-digit integer is itself expensive (~1-2 seconds)
+    -- the header re-renders the same few values (floor, unit, position)
+    repeatedly between navigation actions.
+    """
+    key = (n, digits)
+    if key in _format_big_cache:
+        return _format_big_cache[key]
+
     s = str(n)
     if len(s) <= digits * 2 + 3:
-        return f"{n:,}"
-    return f"{s[:digits]}...{s[-digits:]} ({len(s)} digits)"
+        result = f"{n:,}"
+    else:
+        result = f"{s[:digits]}...{s[-digits:]} ({len(s)} digits)"
+
+    # Simple bound: clear the cache if it grows past the small limit.
+    # We only ever need to hold the current floor/unit/position triple.
+    if len(_format_big_cache) >= _FORMAT_BIG_CACHE_MAX:
+        _format_big_cache.clear()
+    _format_big_cache[key] = result
+    return result
 
 # -- Life book position -------------------------------------------------------
 def derive_life_book_position(player: dict) -> int:
