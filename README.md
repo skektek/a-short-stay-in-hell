@@ -79,7 +79,7 @@ You will almost certainly never find it.
 
 ## Can You Cheat?
 
-Yes. But, also no.
+Yes. And no.
 
 `find_notable.py` exists for exactly this purpose. It walks the Library
 far faster than any soul could on foot, checking thousands of books per
@@ -167,10 +167,25 @@ Verify: `python3 --version` should show 3.12 or later.
 
 ### Get the Files
 
-Download both files into the same directory:
+**Via git (recommended):**
+```bash
+git clone https://github.com/skektek/a-short-stay-in-hell.git
+cd a-short-stay-in-hell
+```
+
+**Or download manually** — if you don't have git, download these files
+into the same directory:
 
 - `hell.py` — the main program
 - `hell_interview.py` — the local interview engine
+
+**Optional files** (drop into the same directory if you have them):
+- `zend_avesta.txt` — enables the Zoroastrian scripture easter egg
+
+**To update later:**
+```bash
+git pull
+```
 
 ---
 
@@ -350,7 +365,8 @@ date -d "2026-06-26 14:00:00" +%s    # Linux/macOS
 ## License
 
 This program is offered freely as a tribute to Steven L. Peck's work.
-Please read the novella.
+Please read the novella. It's in the Library somewhere, but it's much
+easier if you just buy it.
 
 *The Library does not require attribution. It contains everything,
 including this README.*
